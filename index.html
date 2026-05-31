@@ -114,7 +114,7 @@
     <h3><span class="n">1</span> Camera</h3>
     <p>Point a webcam at the wall so it sees the whole projected area + the ball.</p>
     <label>Source</label>
-    <select id="camSelect"><option>Start camera to list devices…</option></select>
+    <select id="camSelect"><option value="">Start camera to list devices…</option></select>
     <button class="btn" id="startCam">Start Camera</button>
     <div class="err" id="camErr" style="display:none"></div>
   </div>
@@ -224,12 +224,19 @@ async function listCams(){
 
 async function startCamera(deviceId){
   camErr.style.display='none';
+  // only treat a value as a real device id if it looks like one (not the placeholder)
+  const id = (deviceId && deviceId.length>20 && !deviceId.includes(' ')) ? deviceId : null;
+  const primary = { audio:false, video: id
+    ? { deviceId:{exact:id}, width:{ideal:1280}, height:{ideal:720} }
+    : { facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720} } };
   try{
     if(stream) stream.getTracks().forEach(t=>t.stop());
-    const constraints = { audio:false, video: deviceId
-      ? { deviceId:{exact:deviceId}, width:{ideal:1280}, height:{ideal:720} }
-      : { facingMode:'environment', width:{ideal:1280}, height:{ideal:720} } };
-    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    let s;
+    try{ s = await navigator.mediaDevices.getUserMedia(primary); }
+    catch(err){ // retry with the simplest possible request (handles odd devices / iOS quirks)
+      s = await navigator.mediaDevices.getUserMedia({ audio:false, video:true });
+    }
+    stream = s;
     video.srcObject = stream; await video.play();
     PROC_H = Math.round(PROC_W * (video.videoHeight/video.videoWidth)) || 240;
     proc.width = PROC_W; proc.height = PROC_H;
@@ -241,10 +248,14 @@ async function startCamera(deviceId){
     refreshPlayState();
   }catch(e){
     camErr.style.display='block';
-    camErr.innerHTML = 'Camera blocked: '+e.message+'<br>Run this on <b>localhost</b> or <b>https</b> (a file:// page often blocks the camera). Deploy to Vercel/Netlify or run a local server.';
+    let tip = 'Run on <b>https</b> or <b>localhost</b> (a file:// page blocks the camera).';
+    if(e.name==='NotAllowedError') tip = 'Permission denied. In Safari tap "aA" → Website Settings → Camera → Allow, then reload. Make sure you are in real Safari, not an in-app browser.';
+    else if(e.name==='NotFoundError') tip = 'No camera found. On a Mac, pick your iPhone (Continuity Camera) or a webcam from the Source list.';
+    else if(e.name==='NotReadableError') tip = 'The camera is in use by another app. Close FaceTime/Zoom/Photo Booth and try again.';
+    camErr.innerHTML = 'Camera error ('+(e.name||'unknown')+'): '+e.message+'<br>'+tip;
   }
 }
-document.getElementById('startCam').onclick = ()=> startCamera(camSelect.value && camSelect.value.length>20 ? camSelect.value : null);
+document.getElementById('startCam').onclick = ()=> startCamera(camSelect.value || null);
 camSelect.onchange = ()=>{ if(camRunning) startCamera(camSelect.value); };
 
 /* ============================================================
