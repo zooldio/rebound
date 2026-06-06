@@ -4,6 +4,9 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>REBOUND — AR Wall Trainer</title>
+<!-- in-browser object detector: TensorFlow.js + COCO-SSD (detects the "sports ball" class) -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <style>
   :root{
     --bg:#0b130e;            /* pitch night */
@@ -131,21 +134,33 @@
   </div>
 
   <!-- STEP 3 -->
-  <div class="step" id="s3">
+  <div class="step done" id="s3">
     <h3><span class="n">3</span> Ball</h3>
-    <p>Pick your ball colour, or click <b>Sample</b> then click the ball in the preview.</p>
-    <div class="swatches" id="swatches"></div>
-    <button class="btn ghost sm" id="sampleBall" style="margin-top:8px">Sample colour from preview</button>
     <label>Detection mode</label>
     <select id="mode">
-      <option value="color">Colour tracking (recommended)</option>
+      <option value="ai">AI ball detector (recommended)</option>
+      <option value="color">Colour tracking</option>
       <option value="motion">Motion / impact</option>
     </select>
-    <label>Sensitivity <span class="rangeval" id="sensVal">35</span></label>
-    <input type="range" id="sens" min="10" max="80" value="35" />
-    <label>Min ball size <span class="rangeval" id="sizeVal">18</span></label>
-    <input type="range" id="minsize" min="4" max="80" value="18" />
-    <button class="btn ghost sm" id="toggleDebug" style="margin-top:10px">Show detection mask (D)</button>
+
+    <div id="aiControls">
+      <div class="stat" style="margin-top:9px">Model <b id="aiStatus">loading…</b></div>
+      <label>Min confidence <span class="rangeval" id="confVal">30%</span></label>
+      <input type="range" id="conf" min="10" max="80" value="30" />
+      <p class="hint">Detects any football automatically — no colour setup needed. First load downloads the model (~a few MB), then it's cached.</p>
+    </div>
+
+    <div id="colorControls" style="display:none">
+      <p>Pick your ball colour, or click <b>Sample</b> then click the ball in the preview.</p>
+      <div class="swatches" id="swatches"></div>
+      <button class="btn ghost sm" id="sampleBall" style="margin-top:8px">Sample colour from preview</button>
+      <label>Sensitivity <span class="rangeval" id="sensVal">35</span></label>
+      <input type="range" id="sens" min="10" max="80" value="35" />
+      <label>Min ball size <span class="rangeval" id="sizeVal">18</span></label>
+      <input type="range" id="minsize" min="4" max="80" value="18" />
+    </div>
+
+    <button class="btn ghost sm" id="toggleDebug" style="margin-top:10px">Show camera detail (D)</button>
   </div>
 
   <!-- STEP 4 -->
@@ -325,8 +340,38 @@ const COLORS={
   yellow:{h:52 ,name:'Yellow',css:'#ffd23a'},
 };
 let ballHue=25, hueTol=22, sampling=false;
-let mode='color', minPixels=18, sensitivity=35;
+let mode='ai', minPixels=18, sensitivity=35;
 let prevGray=null;
+
+/* ---- AI detector: TF.js COCO-SSD, COCO "sports ball" class ---- */
+let aiModel=null, aiReady=false, aiLoading=false, aiMinScore=0.30, aiBusy=false;
+let latestDet=null;   // {x,y,score,bbox} — normalized centroid + video-px bbox, or null
+function setAiStatus(t){ const el=document.getElementById('aiStatus'); if(el) el.textContent=t; }
+async function loadAI(){
+  if(aiModel||aiLoading) return;
+  aiLoading=true; setAiStatus('loading…');
+  let tries=0;  // CDN libs may still be loading
+  while((typeof window.cocoSsd==='undefined'||typeof window.tf==='undefined')&&tries<120){ await new Promise(r=>setTimeout(r,100)); tries++; }
+  if(typeof window.cocoSsd==='undefined'){ setAiStatus('library failed (offline?)'); aiLoading=false; return; }
+  try{ aiModel=await window.cocoSsd.load({base:'lite_mobilenet_v2'}); aiReady=true; setAiStatus('ready ✓'); }
+  catch(e){ setAiStatus('error: '+(e.message||e)); }
+  aiLoading=false; refreshPlayState();
+}
+async function aiDetectTick(){
+  if(mode==='ai' && aiReady && camRunning && video.readyState>=2 && video.videoWidth && !aiBusy){
+    aiBusy=true;
+    try{
+      const preds = await aiModel.detect(video, 20, 0.15);
+      let best=null;
+      for(const p of preds){ if(p.class!=='sports ball'||p.score<aiMinScore) continue; if(!best||p.score>best.score) best=p; }
+      if(best){ const b=best.bbox;
+        latestDet={ x:(b[0]+b[2]/2)/video.videoWidth, y:(b[1]+b[3]/2)/video.videoHeight, score:best.score, bbox:b }; }
+      else latestDet=null;
+    }catch(e){}
+    aiBusy=false;
+  } else if(mode!=='ai'){ latestDet=null; }
+  requestAnimationFrame(aiDetectTick);
+}
 
 // swatches UI
 const swWrap=document.getElementById('swatches');
@@ -339,7 +384,12 @@ Object.entries(COLORS).forEach(([k,c],i)=>{
 });
 document.getElementById('s3').classList.add('done'); // default orange ok
 
-document.getElementById('mode').onchange=e=>{ mode=e.target.value; prevGray=null; };
+function updateModeUI(){
+  document.getElementById('aiControls').style.display = (mode==='ai')?'block':'none';
+  document.getElementById('colorControls').style.display = (mode==='ai')?'none':'block';
+}
+document.getElementById('mode').onchange=e=>{ mode=e.target.value; prevGray=null; if(mode==='ai') loadAI(); updateModeUI(); refreshPlayState(); };
+document.getElementById('conf').oninput=e=>{ aiMinScore=(+e.target.value)/100; document.getElementById('confVal').textContent=e.target.value+'%'; };
 document.getElementById('sens').oninput=e=>{ sensitivity=+e.target.value; document.getElementById('sensVal').textContent=sensitivity; };
 document.getElementById('minsize').oninput=e=>{ minPixels=+e.target.value; document.getElementById('sizeVal').textContent=minPixels; };
 document.getElementById('toggleDebug').onclick=()=>debug=!debug;
@@ -485,13 +535,16 @@ function loop(){
   fpsSmooth=fpsSmooth*0.9+(1/dt)*0.1;
   frame++;
 
-  // --- camera processing ---
+  // --- detection ---
   let det=null;
   if(camRunning && video.readyState>=2){
-    px.drawImage(video,0,0,PROC_W,PROC_H);
-    const img=px.getImageData(0,0,PROC_W,PROC_H);
-    const paint = (frame%2===0); // paint feed every other frame
-    det = detectBall(img.data, paint || debug ? true : (frame%3===0));
+    if(mode==='ai'){
+      det = latestDet;
+    } else {
+      px.drawImage(video,0,0,PROC_W,PROC_H);
+      const img=px.getImageData(0,0,PROC_W,PROC_H);
+      det = detectBall(img.data, debug);
+    }
     drawFeedOverlay(det);
     if(det && H){
       const [gxp,gyp]=applyH(H,det.x,det.y);
@@ -529,7 +582,7 @@ function loop(){
   if(testFlash && now-testFlash<1500) drawTestGrid(now);
 
   // live readouts
-  document.getElementById('liveDet').textContent = det? ('yes ('+det.size+'px)') : 'no';
+  document.getElementById('liveDet').textContent = det ? (det.score!=null ? ('yes '+Math.round(det.score*100)+'%') : ('yes ('+det.size+'px)')) : 'no';
   document.getElementById('liveDet').style.color = det? 'var(--lime)':'var(--muted)';
   document.getElementById('liveFps').textContent = fpsSmooth.toFixed(0);
 
@@ -629,12 +682,9 @@ function drawTestGrid(now){
   gx.globalAlpha=1;
 }
 function drawFeedOverlay(det){
-  if(!debug && frame%2!==0){} // feed already painted in detect when mask/debug
-  if(!debug){
-    // when not in mask mode, paint plain feed each ~3rd frame
-    if(frame%3===0){ fx.drawImage(video,0,0,PROC_W,PROC_H); }
-  }
-  // draw calibration points + polygon
+  const maskShown = (mode!=='ai' && debug); // colour/motion debug paints its own mask
+  if(!maskShown) fx.drawImage(video,0,0,PROC_W,PROC_H);
+  // calibration points + polygon
   fx.lineWidth=2; fx.strokeStyle='#c6ff3a'; fx.fillStyle='#c6ff3a';
   const L=['TL','TR','BR','BL'];
   calibPts.forEach((p,i)=>{ const x=p.x*PROC_W,y=p.y*PROC_H;
@@ -642,8 +692,13 @@ function drawFeedOverlay(det){
     fx.fillStyle='#0b130e';fx.font='700 9px sans-serif';fx.textAlign='center';fx.fillText(L[i],x,y+3);fx.fillStyle='#c6ff3a'; });
   if(calibPts.length>1){ fx.beginPath(); calibPts.forEach((p,i)=>{ const x=p.x*PROC_W,y=p.y*PROC_H;
     i?fx.lineTo(x,y):fx.moveTo(x,y); }); if(calibPts.length===4)fx.closePath(); fx.stroke(); }
-  // detected ball on feed
-  if(det){ fx.strokeStyle='#fff'; fx.beginPath(); fx.arc(det.x*PROC_W,det.y*PROC_H,7,0,7); fx.stroke(); }
+  // detection marker
+  if(det){
+    fx.strokeStyle='#fff'; fx.lineWidth=2;
+    if(det.bbox && video.videoWidth){ const sx=PROC_W/video.videoWidth, sy=PROC_H/video.videoHeight;
+      fx.strokeRect(det.bbox[0]*sx, det.bbox[1]*sy, det.bbox[2]*sx, det.bbox[3]*sy); }
+    else { fx.beginPath(); fx.arc(det.x*PROC_W,det.y*PROC_H,7,0,7); fx.stroke(); }
+  }
 }
 
 /* ============================================================
@@ -651,7 +706,7 @@ function drawFeedOverlay(det){
    ============================================================ */
 const panel=document.getElementById('panel');
 document.getElementById('gear').onclick=()=>panel.classList.toggle('hidden');
-function refreshPlayState(){ document.getElementById('play').disabled = !(camRunning && H); }
+function refreshPlayState(){ document.getElementById('play').disabled = !(camRunning && H && (mode!=='ai'||aiReady)); }
 document.getElementById('play').onclick=startRound;
 document.getElementById('stop').onclick=endRound;
 
@@ -659,12 +714,15 @@ addEventListener('keydown',e=>{
   if(e.key==='c'||e.key==='C') panel.classList.toggle('hidden');
   if(e.key==='d'||e.key==='D') debug=!debug;
   if(e.key==='f'||e.key==='F'){ if(!document.fullscreenElement)document.documentElement.requestFullscreen(); else document.exitFullscreen(); }
-  if(e.code==='Space'){ e.preventDefault(); if(playing) endRound(); else if(camRunning&&H) startRound(); }
+  if(e.code==='Space'){ e.preventDefault(); if(playing) endRound(); else if(!document.getElementById('play').disabled) startRound(); }
 });
 
 // duration label
 document.getElementById('dur').oninput=e=>document.getElementById('durVal').textContent=e.target.value+'s';
 
+updateModeUI();   // show AI controls by default
+loadAI();         // start downloading the detector now
+aiDetectTick();   // async detection loop (runs only in AI mode)
 loop();
 </script>
 </body>
